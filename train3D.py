@@ -221,8 +221,8 @@ def train_fn(model, optimizer, criterion, loader, device):
     model.train()
     total_loss = 0.
     for i, data in enumerate(loader):
-        x = data[0].to(device)
-        y = data[1].to(device)
+        x = data[0]
+        y = data[1]
 
         optimizer.zero_grad()
         y_hat, _ = model(x)
