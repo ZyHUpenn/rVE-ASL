@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
+import torchvision.models as models
 
 def load_nii(filename):
     data = nib.load(filename)
@@ -89,6 +90,147 @@ def one_hot_encode(labels, num_classes):
     one_hot = torch.zeros((batch_size, num_classes), dtype=torch.float32, device=labels.device)
     one_hot.scatter_(1, labels.unsqueeze(1), 1)  # Efficiently set correct index to 1
     return one_hot
+
+
+class MobileNetV2Classifier(nn.Module):
+    def __init__(self, input_dim, num_classes):
+        super(MobileNetV2Classifier, self).__init__()
+        self.dictionary = load_nii("./data/1/theoretical_efficiency.nii")
+        self.dictionary = torch.LongTensor(self.dictionary).to(device)
+        self.ve_parameter = loadmat("./dictionary/ve_param.mat")
+        self.ve_parameter = load_rve_encoding(self.ve_parameter).to(device)
+        self.softmax = nn.Softmax(dim=1)  # Convert logits to probabilities
+
+        # Load Pretrained MobileNetV2
+        self.mobilenet = models.mobilenet_v2(pretrained=True)
+
+        # Modify the first convolutional layer to accept 62 features
+        self.mobilenet.features[0][0] = nn.Conv2d(1, 32, kernel_size=(3, 1), stride=2, padding=(1, 0), bias=False)
+
+        # Modify the classifier layer for 173,225 classes
+        self.mobilenet.classifier[1] = nn.Linear(1280, num_classes)
+
+    def forward(self, x):
+        x = x.unsqueeze(1).unsqueeze(1)  # Reshape to (batch_size, 1, 62, 1) for Conv2d
+        return self.mobilenet(x)
+    def compute_constraint_loss(self, logits, x):
+        """
+        Computes the constraint loss:
+        1. Convert logits to probabilities.
+        2. Find the predicted class index (highest probability).
+        3. Use `constraint_function` to map the class index to 3-size y.
+        4. Compute MSE loss with target y.
+        """
+        probabilities = self.softmax(logits)  # Convert logits to probabilities
+        predicted_indices = torch.argmax(probabilities, dim=1)  # Get predicted class indices
+
+        y_pred_3 = self.dictionary[predicted_indices].float()
+        # y_pred_3 = y_pred_3[:,:22].to(device)
+        # Compute the mean of each column
+        mean1 = x.mean(dim=1, keepdim=True)
+        mean2 = y_pred_3.mean(dim=1, keepdim=True)
+
+        # Compute the standard deviation of each column
+        std1 = x.std(dim=1, unbiased=False, keepdim=True)
+        std2 = y_pred_3.std(dim=1, unbiased=False, keepdim=True)
+
+        # Compute covariance
+        covariance = ((x - mean1) * (y_pred_3 - mean2)).mean(dim=1)
+        correlation = covariance / (std1.squeeze() * std2.squeeze())
+
+        # Filter values greater than 0.6
+        filtered_corr = correlation[correlation > 0.6]
+
+        # Compute the average of the remaining correlations
+        if len(filtered_corr) > 0:
+            avg_correlation = filtered_corr.mean().item()
+        else:
+            avg_correlation = 0
+
+        return 1-avg_correlation
+
+    def constraint_loss(self, logits, x):
+
+        probabilities = self.softmax(logits)  # Convert logits to probabilities
+        predicted_indices = torch.argmax(probabilities, dim=1)  # Get predicted class indices
+        y_pred_4 = dictionary[predicted_indices].float()
+
+        labeling_efficiencies = compute_labeling_efficiencies_pytorch(y_pred_4, self.ve_parameter)
+        ns, ne = labeling_efficiencies.shape
+        labeling_efficiencies = torch.cat([torch.ones(ns, 2).to(labeling_efficiencies.device), labeling_efficiencies],
+                                          dim=1)
+        return torch.mean((x - labeling_efficiencies) ** 2)
+
+
+class ResNetClassifier(nn.Module):
+    def __init__(self, input_dim, num_classes):
+        super(ResNetClassifier, self).__init__()
+        self.dictionary = load_nii("./data/1/theoretical_efficiency.nii")
+        self.dictionary = torch.LongTensor(self.dictionary).to(device)
+        self.ve_parameter = loadmat("./dictionary/ve_param.mat")
+        self.ve_parameter = load_rve_encoding(self.ve_parameter).to(device)
+        self.softmax = nn.Softmax(dim=1)  # Convert logits to probabilities
+
+        # Load Pretrained ResNet
+        self.resnet = models.resnet18(pretrained=True)  # Use ResNet-18 for efficiency
+
+        # Modify the first layer to accept 62 features instead of images
+        self.resnet.conv1 = nn.Conv2d(1, 64, kernel_size=(7, 1), stride=2, padding=(3, 0), bias=False)
+
+        # Modify the fully connected layer for 173,225 classes
+        self.resnet.fc = nn.Linear(512, num_classes)
+
+    def forward(self, x):
+        x = x.unsqueeze(1).unsqueeze(1)  # Reshape to (batch_size, 1, 62, 1) for Conv2d
+        return self.resnet(x)
+
+    def compute_constraint_loss(self, logits, x):
+        """
+        Computes the constraint loss:
+        1. Convert logits to probabilities.
+        2. Find the predicted class index (highest probability).
+        3. Use `constraint_function` to map the class index to 3-size y.
+        4. Compute MSE loss with target y.
+        """
+        probabilities = self.softmax(logits)  # Convert logits to probabilities
+        predicted_indices = torch.argmax(probabilities, dim=1)  # Get predicted class indices
+
+        y_pred_3 = self.dictionary[predicted_indices].float()
+        # y_pred_3 = y_pred_3[:,:22].to(device)
+        # Compute the mean of each column
+        mean1 = x.mean(dim=1, keepdim=True)
+        mean2 = y_pred_3.mean(dim=1, keepdim=True)
+
+        # Compute the standard deviation of each column
+        std1 = x.std(dim=1, unbiased=False, keepdim=True)
+        std2 = y_pred_3.std(dim=1, unbiased=False, keepdim=True)
+
+        # Compute covariance
+        covariance = ((x - mean1) * (y_pred_3 - mean2)).mean(dim=1)
+        correlation = covariance / (std1.squeeze() * std2.squeeze())
+
+        # Filter values greater than 0.6
+        filtered_corr = correlation[correlation > 0.6]
+
+        # Compute the average of the remaining correlations
+        if len(filtered_corr) > 0:
+            avg_correlation = filtered_corr.mean().item()
+        else:
+            avg_correlation = 0
+
+        return 1-avg_correlation
+
+    def constraint_loss(self, logits, x):
+
+        probabilities = self.softmax(logits)  # Convert logits to probabilities
+        predicted_indices = torch.argmax(probabilities, dim=1)  # Get predicted class indices
+        y_pred_4 = dictionary[predicted_indices].float()
+
+        labeling_efficiencies = compute_labeling_efficiencies_pytorch(y_pred_4, self.ve_parameter)
+        ns, ne = labeling_efficiencies.shape
+        labeling_efficiencies = torch.cat([torch.ones(ns, 2).to(labeling_efficiencies.device), labeling_efficiencies],
+                                          dim=1)
+        return torch.mean((x - labeling_efficiencies) ** 2)
 
 # CNN Model for Multi-Class Classification
 class CNNClassifier(nn.Module):
@@ -243,7 +385,9 @@ if __name__ == "__main__":
     data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     # Initialize Model & Optimizer
-    model = CNNClassifier(input_dim, num_classes).to(device)
+    # model = CNNClassifier(input_dim, num_classes).to(device)
+    # model = ResNetClassifier(input_dim, num_classes).to(device)
+    model = MobileNetV2Classifier(input_dim, num_classes).to(device)
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     cross_entropy_loss = nn.CrossEntropyLoss()
 
